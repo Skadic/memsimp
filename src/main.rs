@@ -1,6 +1,4 @@
 use std::{
-    borrow::Cow,
-    path::PathBuf,
     process::{exit, Command},
     sync::mpsc::Receiver,
     time::Duration,
@@ -17,41 +15,28 @@ use std::{
 /// waits until collecting another sample.
 /// * `receiver` - A receiver which receives a message from the main thread when the child process
 /// returns.
-fn sample_loop(
-    binary_name: &str,
-    pid: u32,
-    sample_rate_ms: usize,
-    receiver: Receiver<()>,
-) -> usize {
+fn sample_loop(pid: u32, sample_rate_ms: usize, receiver: Receiver<()>) -> usize {
     let mut peak_kilo_bytes = 0;
+    let proc_path = format!("/proc/{pid}/statm");
     let sample_wait_duration = Duration::from_millis(sample_rate_ms as u64);
-    let allowed = [binary_name, "[ anon ]", "lib"];
-
-    let pid_str = pid.to_string();
-    while receiver.try_recv().is_err() {
-        let cmd = Command::new("pmap")
-            .arg(&pid_str)
+    let page_size = {
+        let out = Command::new("getconf")
+            .arg("PAGESIZE")
             .output()
             .expect("failed to run pmap");
+        String::from_utf8_lossy(out.stdout.as_slice())
+            .trim()
+            .parse::<usize>()
+            .expect("page size must be integer")
+    };
+    while receiver.try_recv().is_err() {
+        let statm = std::fs::read_to_string(&proc_path).expect("could not read statm file");
+        if let Some(pages) = statm.split_ascii_whitespace().nth(1) {
+            if let Ok(pages) = pages.parse::<usize>() {
+                peak_kilo_bytes = peak_kilo_bytes.max((pages * page_size) / 1000);
+            }
+        }
 
-        let output: Cow<'_, str> = String::from_utf8_lossy(cmd.stdout.as_slice());
-        // Parse the output of pmap and try collecting memory maps that should correspond to
-        // allocated memory
-        let sample_kilobytes = output
-            .lines()
-            .skip(1)
-            .filter(|line| allowed.iter().any(|token| line.contains(token)))
-            .filter_map(|line| line.split_ascii_whitespace().nth(1))
-            .map(|kilobyte_str| &kilobyte_str[..kilobyte_str.len() - 1])
-            .map(|kilobyte_str| {
-                kilobyte_str
-                    .parse::<usize>()
-                    .expect("memory bites not integer")
-            })
-            .reduce(|l, r| l + r)
-            .unwrap_or_default();
-
-        peak_kilo_bytes = peak_kilo_bytes.max(sample_kilobytes);
         std::thread::sleep(sample_wait_duration);
     }
 
@@ -87,22 +72,13 @@ fn main() {
 
     let (sender, receiver) = std::sync::mpsc::sync_channel::<()>(1);
 
-    let os_binary_name = PathBuf::from(args[0].clone());
-    let binary_name = os_binary_name
-        .file_name()
-        .expect("could not get file name")
-        .to_string_lossy()
-        .to_string();
-
     let mut cmd = Command::new(args[0].clone())
         .args(args.into_iter().skip(1))
         .spawn()
         .expect("failed to start program");
     let pid = cmd.id();
 
-    let handle = std::thread::spawn(move || {
-        sample_loop(binary_name.as_ref(), pid, sample_rate_ms, receiver)
-    });
+    let handle = std::thread::spawn(move || sample_loop(pid, sample_rate_ms, receiver));
 
     cmd.wait().expect("could not wait for child");
     sender.send(()).expect("could not send message");

@@ -1,6 +1,6 @@
 # memsimp
 
-Track the approximate memory usage of any program at runtime using `pmap`.
+Track the approximate memory usage of any program at runtime using `proc statm`.
 
 ## Usage
 
