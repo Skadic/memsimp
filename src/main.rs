@@ -18,7 +18,12 @@ use clap::Parser;
 /// * `timeout_ms` - The time to wait before starting to collect samples in milliseconds.
 /// * `receiver` - A receiver which receives a message from the main thread when the child process
 /// returns.
-fn sample_loop(pid: u32, sample_rate_ms: usize, timeout_ms: usize, receiver: Receiver<()>) -> usize {
+fn sample_loop(
+    pid: u32,
+    sample_rate_ms: usize,
+    timeout_ms: usize,
+    receiver: Receiver<()>,
+) -> usize {
     std::thread::sleep(Duration::from_millis(timeout_ms as u64));
     let mut peak_kilo_bytes = 0;
     let proc_path = format!("/proc/{pid}/statm");
@@ -75,10 +80,22 @@ fn main() {
 
     let (sender, receiver) = std::sync::mpsc::sync_channel::<()>(1);
 
-    let mut cmd = Command::new(args[0].clone())
+    let binary_name = args[0].clone();
+    let mut cmd = match Command::new(&binary_name)
         .args(args.into_iter().skip(1))
         .spawn()
-        .expect("failed to start program");
+    {
+        Ok(cld) => cld,
+        Err(e) => {
+            match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    eprintln!("binary \"{}\" not found: {e}", binary_name);
+                }
+                _ => eprintln!("error spawning child process: {e}"),
+            };
+            exit(1)
+        }
+    };
     let pid = cmd.id();
 
     let handle = std::thread::spawn(move || sample_loop(pid, sample_rate_ms, timeout_ms, receiver));
