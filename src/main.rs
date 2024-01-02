@@ -4,6 +4,8 @@ use std::{
     time::Duration,
 };
 
+use clap::Parser;
+
 /// Continuously collects memory samples from a running process and returns the peak memory usage
 /// in kilobytes.
 ///
@@ -13,9 +15,11 @@ use std::{
 /// * `pid` - The binary's pid
 /// * `sample_rate_ms` - The sample rate in milliseconds, which is the time the sampling thread
 /// waits until collecting another sample.
+/// * `timeout_ms` - The time to wait before starting to collect samples in milliseconds.
 /// * `receiver` - A receiver which receives a message from the main thread when the child process
 /// returns.
-fn sample_loop(pid: u32, sample_rate_ms: usize, receiver: Receiver<()>) -> usize {
+fn sample_loop(pid: u32, sample_rate_ms: usize, timeout_ms: usize, receiver: Receiver<()>) -> usize {
+    std::thread::sleep(Duration::from_millis(timeout_ms as u64));
     let mut peak_kilo_bytes = 0;
     let proc_path = format!("/proc/{pid}/statm");
     let sample_wait_duration = Duration::from_millis(sample_rate_ms as u64);
@@ -43,32 +47,31 @@ fn sample_loop(pid: u32, sample_rate_ms: usize, receiver: Receiver<()>) -> usize
     peak_kilo_bytes
 }
 
-fn main() {
-    let (sample_rate_ms, args) =
-        if let Some(binary_arg_pos) = std::env::args().position(|s| s == "--") {
-            if binary_arg_pos != 2 {
-                eprintln!("invalid arguments. only sample rate is allowed before \"--\"");
-                exit(1);
-            }
-            let args = std::env::args()
-                .skip(binary_arg_pos + 1)
-                .collect::<Vec<_>>();
-            let sample_rate_ms = std::env::args()
-                .nth(1)
-                .map(|arg| {
-                    arg.parse::<usize>()
-                        .expect("sample rate must be a positive integer")
-                })
-                .unwrap();
-            (sample_rate_ms, args)
-        } else {
-            (100usize, std::env::args().skip(1).collect::<Vec<_>>())
-        };
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+#[clap(trailing_var_arg = true)]
+struct Args {
+    /// The number of milliseconds to wait between each sample
+    #[arg(short, long)]
+    sample_rate: Option<usize>,
+    /// The number of milliseconds to wait before starting to collect samples
+    #[arg(short, long)]
+    timeout: Option<usize>,
+    /// The program to run including arguments
+    app: Vec<String>,
+}
 
-    if args.is_empty() {
-        eprintln!("Please enter a binary to run");
+fn main() {
+    let args = Args::parse();
+
+    if args.app.is_empty() {
+        eprintln!("no application given. Use --help for usage");
         exit(1);
     }
+
+    let sample_rate_ms = args.sample_rate.unwrap_or(100);
+    let timeout_ms = args.timeout.unwrap_or(0);
+    let args = args.app;
 
     let (sender, receiver) = std::sync::mpsc::sync_channel::<()>(1);
 
@@ -78,7 +81,7 @@ fn main() {
         .expect("failed to start program");
     let pid = cmd.id();
 
-    let handle = std::thread::spawn(move || sample_loop(pid, sample_rate_ms, receiver));
+    let handle = std::thread::spawn(move || sample_loop(pid, sample_rate_ms, timeout_ms, receiver));
 
     cmd.wait().expect("could not wait for child");
     sender.send(()).expect("could not send message");
